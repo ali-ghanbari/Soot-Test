@@ -1,0 +1,5 @@
+./target
+./sootOutput
+./*.dom
+./*.map
+./*.bdd
