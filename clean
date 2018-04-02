@@ -1,0 +1,6 @@
+#!/bin/bash
+
+rm *.dom
+rm *.map
+rm *.bdd
+rm -rf sootOutput

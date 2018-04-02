@@ -1,7 +1,9 @@
 package edu.utdallas.main;
 
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import edu.utdallas.relational.Dom;
 import edu.utdallas.relational.Rel;
@@ -16,18 +18,23 @@ import soot.SootMethod;
 import soot.Type;
 import soot.Unit;
 import soot.Value;
+import soot.ValueBox;
 import soot.jimple.AnyNewExpr;
 import soot.jimple.AssignStmt;
-import soot.jimple.ClassConstant;
 import soot.jimple.Constant;
-import soot.jimple.IdentityStmt;
+import soot.jimple.FieldRef;
+import soot.jimple.InstanceFieldRef;
 import soot.jimple.InvokeExpr;
 import soot.jimple.InvokeStmt;
 import soot.jimple.NewArrayExpr;
 import soot.jimple.NewExpr;
 import soot.jimple.NewMultiArrayExpr;
+import soot.jimple.NullConstant;
+import soot.jimple.ReturnStmt;
+import soot.jimple.StaticInvokeExpr;
 import soot.jimple.StringConstant;
-import soot.jimple.VirtualInvokeExpr;
+import soot.jimple.toolkits.callgraph.CallGraph;
+import soot.jimple.toolkits.callgraph.Edge;
 
 public class MyTransformer extends SceneTransformer {
     private final Dom<HeapAbstraction> heapAbstractionsDom;
@@ -35,9 +42,27 @@ public class MyTransformer extends SceneTransformer {
     private final Dom<InvokeExpr> invocationsDom;
     private final Dom<SootMethod> methodsDom;
     private final Dom<SootField> fieldsDom;
+    private final Dom<Type> typesDom;
+    private final Dom<MethodSignature> signaturesDom;
+    private final Dom<Integer> natural;
     
+    private final Rel vardef; // local variable definition: v = null; v = "string constant";
+    private final Rel sfdef; // static field definition: ClassName.field = null; ClassName.field = "string constant";
+    private final Rel ifdef; // instance field definition: v.field = null; v.field = "string constant";
+    private final Rel paramdef; // parameter definition through calls: ...method(.., "string constant", ...)...
+    private final Rel retdef; // return definition: return null; return "string constant"; 
     private final Rel move;
-    private final Rel alloc;
+    private final Rel ifload;
+    private final Rel sfload;
+    private final Rel ifstore;
+    private final Rel sfstore;
+    private final Rel formal;
+    private final Rel actual;
+    private final Rel fret;
+    private final Rel aret;
+    private final Rel maycall;
+    private final Rel rcvar;
+    private final Rel self;
     
     public MyTransformer() {
         this.heapAbstractionsDom = new Dom<>();
@@ -50,9 +75,30 @@ public class MyTransformer extends SceneTransformer {
         this.methodsDom.setName("M");
         this.fieldsDom = new Dom<>();
         this.fieldsDom.setName("F");
+        this.typesDom = new Dom<>();
+        this.typesDom.setName("T");
+        this.signaturesDom = new Dom<>();
+        this.signaturesDom.setName("S");
+        this.natural = new Dom<>();
+        this.natural.setName("N");
         
         this.move = new Rel();
-        this.alloc = new Rel();
+        this.ifload = new Rel();
+        this.sfload = new Rel();
+        this.ifstore = new Rel();
+        this.sfstore = new Rel();
+        this.vardef = new Rel();
+        this.sfdef = new Rel();
+        this.ifdef = new Rel();
+        this.paramdef = new Rel();
+        this.formal = new Rel();
+        this.actual = new Rel();
+        this.retdef = new Rel();
+        this.fret = new Rel();
+        this.aret = new Rel();
+        this.maycall = new Rel();
+        this.rcvar = new Rel();
+        this.self = new Rel();
     }
 
     @Override
@@ -96,56 +142,72 @@ public class MyTransformer extends SceneTransformer {
         }
     }
     
+    private void addType(Type type) {
+        synchronized(this.typesDom) {
+            this.typesDom.add(type);
+        }
+    }
+    
+    private void addSignature(MethodSignature ms) {
+        synchronized(this.signaturesDom) {
+            this.signaturesDom.add(ms);
+        }
+    }
+    
     private void construct() {
         System.out.print("\nCollecting domains...");
-        Scene.v().getClasses().parallelStream().forEach(appClass -> {
-            for (final SootField field : appClass.getFields()) {
+        
+        for (int i = 0; i < 256; i++) {
+            this.natural.add(i);
+        }
+        
+        this.heapAbstractionsDom.add(Epsilon.EPSILON);
+        
+        Scene.v().getClasses().parallelStream().forEach(theClass -> {
+            addType(theClass.getType());
+            for (final SootField field : theClass.getFields()) {
                 addField(field);
             }
-            for (final SootMethod appMethod : appClass.getMethods()) {
-                /*TODO check if appMethod reachable from main, otherwise ignore it*/
-                if (appMethod.isConcrete()) {
-                    addMethod(appMethod);
-                    Body body = appMethod.retrieveActiveBody();
-                    for (final Local local : body.getLocals()) {
-                        addLocal(local);
-                    }
-                    final Iterator<Unit> bit = body.getUnits().iterator();
-                    while (bit.hasNext()) {
-                        final Unit unit = bit.next();
-                        if (unit instanceof AssignStmt) {
-                            final Value rhsValue = ((AssignStmt) unit).getRightOp();
-                            if (rhsValue instanceof AnyNewExpr) {
-                               final Type type;
-                               if (rhsValue instanceof NewArrayExpr) {
-                                   type = ((NewArrayExpr) rhsValue).getBaseType();
-                               } else if (rhsValue instanceof NewExpr) {
-                                   type = rhsValue.getType();
-                               } else { // NewMultiArrayExpr
-                                   Type bt = ((NewMultiArrayExpr) rhsValue).getType();
-                                   while (bt instanceof ArrayType) {
-                                       bt = ((ArrayType) bt).getArrayElementType();
-                                   }
-                                   type = bt;
-                               }
-                               if (isStringType(type.toString())) {
-                                   addAbstractObject((AnyNewExpr) rhsValue);
-                               }
-                            }
-                            if (rhsValue instanceof StringConstant || rhsValue instanceof ClassConstant) {
-                                addConstant((Constant) rhsValue);
-                            }
-                        } 
-                        final InvokeExpr ie = getInvokeExpr(unit);
-                        if (ie != null) {
-                            for (Value arg : ie.getArgs()) {
-                                if (arg instanceof StringConstant || arg instanceof ClassConstant) {
-                                    addConstant((Constant) arg);
-                                }
-                            }
-                            addInvocation(ie); // we are going to use them in CHA
+            for (final SootMethod method : theClass.getMethods()) {
+                addMethod(method);
+                addSignature(new MethodSignature(method));
+            }
+        });
+        
+        final List<SootMethod> concAppMethods = Scene.v().getApplicationClasses().parallelStream()
+                .map(SootClass::getMethods)
+                .flatMap(List::stream)
+                .filter(SootMethod::isConcrete)
+                .collect(Collectors.toList());
+        
+        concAppMethods.parallelStream().forEach(method -> {
+            Body body = method.retrieveActiveBody();
+            for (final Local local : body.getLocals()) {
+                addLocal(local);
+            }
+            final Iterator<Unit> bit = body.getUnits().iterator();
+            while (bit.hasNext()) {
+                final Unit unit = bit.next();
+                if (unit instanceof AssignStmt) {
+                    final Value rhsValue = ((AssignStmt) unit).getRightOp();
+                    if (rhsValue instanceof AnyNewExpr) {
+                        final Type type = getBaseType((AnyNewExpr) rhsValue);
+                        if (isStringType(type.toString())) {
+                            addAbstractObject((AnyNewExpr) rhsValue);
                         }
                     }
+                    if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                        addConstant((Constant) rhsValue);
+                    }
+                } 
+                final InvokeExpr ie = getInvokeExpr(unit);
+                if (ie != null) {
+                    for (Value arg : ie.getArgs()) {
+                        if (arg instanceof StringConstant || arg instanceof NullConstant) {
+                            addConstant((Constant) arg);
+                        }
+                    }
+                    addInvocation(ie); // we are going to use them in CHA
                 }
             }
         });
@@ -154,6 +216,10 @@ public class MyTransformer extends SceneTransformer {
             this.invocationsDom.save(".", true);
             this.localsDom.save(".", true);
             this.methodsDom.save(".", true);
+            this.fieldsDom.save(".", true);
+            this.typesDom.save(".", true);
+            this.signaturesDom.save(".", true);
+            this.natural.save(".", true);
         } catch (Exception e) {
             System.out.println("\t[FAILED]");
             e.printStackTrace();
@@ -166,26 +232,191 @@ public class MyTransformer extends SceneTransformer {
         this.move.setSign("V0,V1", "V0xV1");
         this.move.setDoms(new Dom[] {this.localsDom, this.localsDom});
         this.move.zero();
+       
+        this.ifload.setName("ifload");
+        this.ifload.setSign("V0,V1,F0", "V0xV1xF0");
+        this.ifload.setDoms(new Dom[] {this.localsDom, this.localsDom, this.fieldsDom});
+        this.ifload.zero();
+
+        this.sfload.setName("sfload");
+        this.sfload.setSign("V0,F0", "V0xF0");
+        this.sfload.setDoms(new Dom[] {this.localsDom, this.fieldsDom});
+        this.sfload.zero();
         
-        this.alloc.setName("alloc");
-        this.alloc.setSign("M0,V0,H0", "M0xV0xH0");
-        this.alloc.setDoms(new Dom[] {this.methodsDom, this.localsDom, this.heapAbstractionsDom});
-        this.alloc.zero();
+        this.ifstore.setName("ifstore");
+        this.ifstore.setSign("V0,F0,V1", "V0xF0xV1");
+        this.ifstore.setDoms(new Dom[] {this.localsDom, this.fieldsDom, this.localsDom});
+        this.ifstore.zero();
+
+        this.sfstore.setName("sfstore");
+        this.sfstore.setSign("F0,V0", "F0xV0");
+        this.sfstore.setDoms(new Dom[] {this.fieldsDom, this.localsDom});
+        this.sfstore.zero();
         
-        Scene.v().getClasses().parallelStream().forEach(appClass -> {
-            for (final SootMethod appMethod : appClass.getMethods()) {
-                if (appMethod.isConcrete()) {
-                    final Iterator<Unit> bit = appMethod.retrieveActiveBody().getUnits().iterator();
-                    while (bit.hasNext()) {
-                        final Unit unit = bit.next();
-                        if (moveAssingment(unit)) {
-                            final Local lhs = (Local) ((AssignStmt) unit).getLeftOp();
-                            final Local rhs = (Local) ((AssignStmt) unit).getRightOp();
-                            addMove(lhs, rhs);
-                        } else if (allocAssignment(unit)) {
-                            final Local lhsLocal = (Local) ((AssignStmt) unit).getLeftOp();
-                            final Value rhsValue = ((AssignStmt) unit).getRightOp();
-                            
+        this.vardef.setName("vardef");
+        this.vardef.setSign("V0,H0", "V0xH0");
+        this.vardef.setDoms(new Dom[] {this.localsDom, this.heapAbstractionsDom});
+        this.vardef.zero();
+        
+        this.sfdef.setName("sfdef");
+        this.sfdef.setSign("F0,H0", "F0xH0");
+        this.sfdef.setDoms(new Dom[] {this.fieldsDom, this.heapAbstractionsDom});
+        this.sfdef.zero();
+        
+        this.ifdef.setName("ifdef");
+        this.ifdef.setSign("V0,F0,H0", "V0xF0xH0");
+        this.ifdef.setDoms(new Dom[] {this.localsDom, this.fieldsDom, this.heapAbstractionsDom});
+        this.ifdef.zero();
+        
+        this.paramdef.setName("paramdef");
+        this.paramdef.setSign("I0,N0,H0", "I0xN0xH0");
+        this.paramdef.setDoms(new Dom[] {this.invocationsDom, this.natural, this.heapAbstractionsDom});
+        this.paramdef.zero();
+        
+        this.retdef.setName("retdef");
+        this.retdef.setSign("M0,H0", "M0xH0");
+        this.retdef.setDoms(new Dom[] {this.methodsDom, this.heapAbstractionsDom});
+        this.retdef.zero();
+        
+        this.formal.setName("formal");
+        this.formal.setSign("M0,N0,V0", "M0xN0xV0");
+        this.formal.setDoms(new Dom[] {this.methodsDom, this.natural, this.localsDom});
+        this.formal.zero();
+        
+        this.actual.setName("actual");
+        this.actual.setSign("I0,N0,V0", "I0xN0xV0");
+        this.actual.setDoms(new Dom[] {this.invocationsDom, this.natural, this.localsDom});
+        this.actual.zero();
+        
+        this.fret.setName("fret");
+        this.fret.setSign("M0,V0", "M0xV0");
+        this.fret.setDoms(new Dom[] {this.methodsDom, this.localsDom});
+        this.fret.zero();
+        
+        this.aret.setName("aret");
+        this.aret.setSign("I0,V0", "I0xV0");
+        this.aret.setDoms(new Dom[] {this.invocationsDom, this.localsDom});
+        this.aret.zero();
+        
+        this.maycall.setName("maycall");
+        this.maycall.setSign("I0,M0", "I0xM0");
+        this.maycall.setDoms(new Dom[] {this.invocationsDom, this.methodsDom});
+        this.maycall.zero();
+        
+        this.rcvar.setName("rcvar");
+        this.rcvar.setSign("I0,V0", "I0xV0");
+        this.rcvar.setDoms(new Dom[] {this.invocationsDom, this.localsDom});
+        this.rcvar.zero();
+        
+        this.self.setName("self");
+        this.self.setSign("M0,V0", "M0xV0");
+        this.self.setDoms(new Dom[] {this.methodsDom, this.localsDom});
+        this.self.zero();
+        
+        final CallGraph cg = Scene.v().getCallGraph();
+        
+        concAppMethods.parallelStream().forEach(method -> {
+            final Body body = method.retrieveActiveBody();
+            for (int i = 0; i < body.getParameterLocals().size(); i++) {
+                addFormal(method, i, body.getParameterLocal(i));
+                if (!method.isStatic()) {
+                    addSelf(method, body.getThisLocal());
+                }
+            }
+            final Iterator<Unit> bit = body.getUnits().iterator();
+            while (bit.hasNext()) {
+                final Unit unit = bit.next();
+                if (unit instanceof InvokeStmt 
+                        || (unit instanceof AssignStmt && ((AssignStmt) unit).containsInvokeExpr())) {
+                    final InvokeExpr ie;
+                    if (unit instanceof InvokeStmt) {
+                        ie = ((InvokeStmt) unit).getInvokeExpr();
+                    } else {
+                        ie = ((AssignStmt) unit).getInvokeExpr();
+                    }
+                    final Iterator<Edge> outs = cg.edgesOutOf(unit);
+                    while (outs.hasNext()) {
+                        final SootMethod callee = outs.next().tgt();
+                        if (concAppMethods.contains(callee)) {
+                            addMayCall(ie, callee);
+                        }
+                    }
+                }
+                if (unit instanceof ReturnStmt) {
+                    Value op = ((ReturnStmt) unit).getOp();
+                    if (op instanceof StringConstant || op instanceof NullConstant) {
+                        addRetDef(method, new ConstantObject((Constant) op));
+                    } else if (op instanceof Local) {
+                        addFRet(method, (Local) op);
+                    }
+                } else if (unit instanceof InvokeStmt) {
+                    final InvokeExpr ie = ((InvokeStmt) unit).getInvokeExpr();
+                    if (!(ie instanceof StaticInvokeExpr)) {
+                        final List<ValueBox> useBoxes = ie.getUseBoxes();
+                        final Local rcvar = (Local) useBoxes.get(useBoxes.size() - 1).getValue();
+                        addReceiverVar(ie, rcvar);
+                    }
+                    for (int i = 0; i < ie.getArgCount(); i ++) {
+                        final Value arg = ie.getArg(i);
+                        if (arg instanceof StringConstant || arg instanceof NullConstant) {
+                            addParamDef(ie, i, new ConstantObject((Constant) arg));
+                        } else if (arg instanceof Local) {
+                            addActual(ie, i, (Local) arg);
+                        }
+                    }
+                } else if (unit instanceof AssignStmt) {
+                    final Value lhsValue = ((AssignStmt) unit).getLeftOp();
+                    if (((AssignStmt) unit).containsInvokeExpr()) {
+                        final InvokeExpr ie = ((AssignStmt) unit).getInvokeExpr();
+                        addARet(ie, (Local) lhsValue);
+                        for (int i = 0; i < ie.getArgCount(); i ++) {
+                            final Value arg = ie.getArg(i);
+                            if (arg instanceof StringConstant || arg instanceof NullConstant) {
+                                addParamDef(ie, i, new ConstantObject((Constant) arg));
+                            } else if (arg instanceof Local) {
+                                addActual(ie, i, (Local) arg);
+                            }
+                        }
+                    }
+                    final Value rhsValue = ((AssignStmt) unit).getRightOp();
+                    if (lhsValue instanceof Local) {
+                        final Local lhsLocal = (Local) ((AssignStmt) unit).getLeftOp();
+                        if (rhsValue instanceof Local) {
+                            final Local rhsLocal = (Local) rhsValue;
+                            addMove(lhsLocal, rhsLocal);
+                        } else if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                            addVarDef(lhsLocal, new ConstantObject((Constant) rhsValue));
+                        } else if (rhsValue instanceof AnyNewExpr) {
+                            final Type type = getBaseType((AnyNewExpr) rhsValue);
+                            if (isStringType(type.toString())) {
+                                addVarDef(lhsLocal, new AbstractHeapObject((AnyNewExpr) rhsValue));
+                            }
+                        } else if (rhsValue instanceof FieldRef) {
+                            final FieldRef fr = (FieldRef) rhsValue;
+                            final SootField field = fr.getField();
+                            if (fr instanceof InstanceFieldRef) {
+                                final Local base = (Local) fr.getUseBoxes().get(0).getValue();
+                                addInstanceFieldLoad(lhsLocal, base, field);
+                            } else {
+                                addStaticFieldLoad(lhsLocal, field);
+                            }
+                        }
+                    } else if (lhsValue instanceof FieldRef) {
+                        final FieldRef fr = (FieldRef) lhsValue;
+                        final SootField field = fr.getField();
+                        if (fr instanceof InstanceFieldRef) {
+                            final Local base = (Local) fr.getUseBoxes().get(0).getValue();
+                            if (rhsValue instanceof Local) {
+                                addInstanceFieldStore(base, field, (Local) rhsValue);
+                            }  else if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                                addIFDef(base, field, new ConstantObject((Constant) rhsValue));
+                            }
+                        } else { //static field reference
+                            if (rhsValue instanceof Local) {
+                                addStaticFieldStore(field, (Local) rhsValue);
+                            } else if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                                addSFDef(field, new ConstantObject((Constant) rhsValue));
+                            }
                         }
                     }
                 }
@@ -193,7 +424,22 @@ public class MyTransformer extends SceneTransformer {
         });
         try {
             this.move.save(".");
-            this.alloc.save(".");
+            this.ifload.save(".");
+            this.sfload.save(".");
+            this.ifstore.save(".");
+            this.sfstore.save(".");
+            this.vardef.save(".");
+            this.sfdef.save(".");
+            this.ifdef.save(".");
+            this.paramdef.save(".");
+            this.retdef.save(".");
+            this.formal.save(".");
+            this.actual.save(".");
+            this.fret.save(".");
+            this.aret.save(".");
+            this.maycall.save(".");
+            this.rcvar.save(".");
+            this.self.save(".");
         } catch (Exception e) {
             System.out.println("\t[FAILED]");
             e.printStackTrace();
@@ -202,41 +448,135 @@ public class MyTransformer extends SceneTransformer {
         System.out.println("\t[OK]");
     }
     
-    private void addMove(Local l0, Local l1) {
+    private void addSelf(SootMethod method, Local tl) {
+        synchronized (this.self) {
+            this.self.add(method, tl);
+        }
+    }
+
+    private void addReceiverVar(InvokeExpr ie, Local l) {
+        synchronized (this.rcvar) {
+            this.rcvar.add(ie, l);
+        }
+    }
+    
+    private void addMayCall(InvokeExpr ie, SootMethod callee) {
+        synchronized (this.maycall) {
+            this.maycall.add(ie, callee);
+        }
+    }
+    
+    private void addARet(InvokeExpr ie, Local local) {
+        synchronized (this.aret) {
+            this.aret.add(ie, local);
+        }
+    }
+    
+    private void addFRet(SootMethod method, Local local) {
+        synchronized (this.fret) {
+            this.fret.add(method, local);
+        }
+    }
+    
+    private void addRetDef(SootMethod method, HeapAbstraction ha) {
+        synchronized (this.retdef) {
+            this.retdef.add(method, ha);
+        }
+    }
+    
+    private void addActual(InvokeExpr ie, int n, Local arg) {
+        synchronized (this.actual) {
+            this.actual.add(ie, n, arg);
+        }
+    }
+    
+    private void addFormal(SootMethod method, int n, Local param) {
+        synchronized (this.formal) {
+            this.formal.add(method, n, param);
+        }
+    }
+    
+    private void addParamDef(InvokeExpr ie, int n, HeapAbstraction ha) {
+        synchronized (this.paramdef) {
+            this.paramdef.add(ie, n, ha);
+        }
+    }
+    
+    private void addIFDef(Local base, SootField field, HeapAbstraction ha) {
+        synchronized (this.ifdef) {
+            this.ifdef.add(base, field, ha);
+        }
+    }
+    
+    private void addVarDef(Local lhsLocal, HeapAbstraction ha) {
+        synchronized (this.vardef) {
+            this.vardef.add(lhsLocal, ha);
+        }
+    }
+    
+    private void addSFDef(SootField field, HeapAbstraction ha) {
+        synchronized (this.sfdef) {
+            this.sfdef.add(field, ha);
+        }
+    }
+    
+    private void addInstanceFieldStore(Local base, SootField field, Local from) {
+        synchronized (this.ifstore) {
+            this.ifstore.add(base, field, from);
+        }
+    }
+    
+    private void addStaticFieldStore(SootField field, Local from) {
+        synchronized (this.sfstore) {
+            this.sfstore.add(field, from);
+        }
+    }
+    
+    private void addInstanceFieldLoad(Local to, Local base, SootField field) {
+        synchronized (this.ifload) {
+            this.ifload.add(to, base, field);
+        }
+    }
+    
+    private void addStaticFieldLoad(Local to, SootField field) {
+        synchronized (this.sfload) {
+            this.sfload.add(to, field);
+        }
+    }
+    
+    private Type getBaseType(AnyNewExpr ane) {
+        final Type type;
+        if (ane instanceof NewArrayExpr) {
+            type = ((NewArrayExpr) ane).getBaseType();
+        } else if (ane instanceof NewExpr) {
+            type = ane.getType();
+        } else { // NewMultiArrayExpr
+            Type bt = ((NewMultiArrayExpr) ane).getType();
+            while (bt instanceof ArrayType) {
+                bt = ((ArrayType) bt).getArrayElementType();
+            }
+            type = bt;
+        }
+        return type;
+    }
+    
+    private void addMove(Local lhs, Local rhs) {
         synchronized(this.move) {
-            this.move.add(l0, l1);
+            this.move.add(lhs, rhs);
         }
     }
-    
-    private void addAlloc(SootMethod m, Local l, AnyNewExpr ane) {
-        synchronized(this.alloc) {
-            this.alloc.add(m, l, ane);
-        }
-    }
-    
-    private boolean moveAssingment(Unit u) {
-        return u instanceof AssignStmt 
-                && ((AssignStmt) u).getLeftOp() instanceof Local
-                && ((AssignStmt) u).getRightOp() instanceof Local; 
-    }
-    
-    private boolean allocAssignment(Unit u) {
-        if (!(u instanceof AssignStmt)) {
-            return false;
-        }
-        final Value rhsValue = ((AssignStmt) u).getRightOp();
-        return ((AssignStmt) u).getLeftOp() instanceof Local
-                && (rhsValue instanceof StringConstant 
-                        || rhsValue instanceof ClassConstant 
-                        || rhsValue instanceof AnyNewExpr); 
-    }
-    
-    private boolean isStringOps(SootMethod ops) {
-        return ops.getName().matches("append|toString|<init>") 
-                && isStringType(ops.getDeclaringClass().getJavaStyleName());
-                    
-    }
-    
+//    
+//    private void addAlloc(SootMethod m, Local l, HeapAbstraction ha) {
+//        synchronized(this.alloc) {
+//            this.alloc.add(m, l, ha);
+//        }
+//    }
+//    
+//    private boolean isTrackable(Type type) {
+//        final String typeName = type.toString();
+//        return isStringType(typeName) || typeName.matches("java\\.lang\\.Class"); 
+//    }
+//        
     private boolean isStringType(String typeName) {
         return typeName.matches("java\\.lang\\.String|java\\.lang\\.StringBuilder|java\\.lang\\.StringBuffer");
     }
@@ -252,6 +592,12 @@ public class MyTransformer extends SceneTransformer {
     
 }
 
+
+//private boolean isStringOps(SootMethod ops) {
+//return ops.getName().matches("append|toString|<init>") 
+//      && isStringType(ops.getDeclaringClass().getJavaStyleName());
+//          
+//}
 
 //final CallGraph cg = Scene.v().getCallGraph();
 //final int numberOfNodes;

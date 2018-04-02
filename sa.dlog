@@ -1,0 +1,56 @@
+.include "H.dom"						# domain of heap abstractions
+.include "V.dom"						# domain of local variables
+.include "I.dom" 						# domain of method invocations
+.include "M.dom"						# domain of methods
+.include "F.dom"						# domain of fields
+.include "T.dom"						# domain of (non-primitive, object) types
+.include "S.dom"						# domain of method signatures
+.include "N.dom"						# natuaral numbers from 0 through 255
+
+### Input Relations
+
+move(dst : V0, src : V1)				input	# statements of the form dst = src, where src and dst are local variables
+ifload(dst : V0, base : V1, field : F0)	  		input	# statements of the form dst = base.field
+sfload(dst : V0, field : F0)	    			input	# statements of the form dst = ClassName.field
+ifstore(base : V0, field : F0, src : V1)		input	# statements of the form base.field = src
+sfstore(field : F0, src : V0)  	     			input	# statements of the form ClassName.field = src
+vardef(lhs : V0, cst : H0)				input	# statements of the form lhs = null or lhs = "string constant"
+ifdef(base : V0, field : F0, cst : H0)			input	# statements of the form base.field = null or base.field = "string constant"
+sfdef(field : F0, cst : H0)  	   			input	# statements of the form ClassName.field = null or ClassName.field = "string constant"
+paramdef(inv : I0, n : N0, ha : H0)			input	# method invocations of the form ...method(...null...) or ...method(..."string constant"...)
+retdef(meth : M0, ha : H0)    				input	# statements of the form return null or return "string constant"
+formal(meth : M0, n : N0, p : V0)	  		input 	# n's parameter of the method meth is variable p
+actual(inv : I0, n : N0, a : V0)	  		input  	# the local variable a is passed as an actual parameter at the method invocation point inv
+rcvar(inv : I0, rv : V0)     				input	# identifies the base variable in a method invocation
+self(meth : M0, this : V0)				input	# identifies this variable of a method
+fret(meth : M0, r : V0)	     				input	# the method meth returns its local r
+aret(inv : I0, a : V0)	 				input	# the variable a is assigned the return value of some method called at inv
+maycall(inv : I0, callee : M0)		  		input	# the method callee may be called at the invocation point inv
+
+### Output Relations
+
+vpt(local : V0, obj : H0)				output
+fpt(baseHeap : H0, field : F0, obj : H1)		output
+
+### Intermediate Relations
+
+ipmv(dst : V0, src : V1)					# interprocedural move
+
+### Rules
+
+vpt(v, o) :- vardef(v, o).
+vpt(v, o) :- maycall(i, m), formal(m, n, v), paramdef(i, n, o).
+vpt(v, o) :- maycall(i, m), aret(i, v), retdef(m, o).
+vpt(v, o) :- move(v, s), vpt(s, o).
+vpt(v, o) :- ipmv(v, s), vpt(s, o).
+vpt(v, o) :- sfload(v, f), fpt("EPSILON", f, o).
+vpt(v, o) :- ifload(v, b, f), vpt(b, bh), fpt(bh, f, o).
+
+fpt("EPSILON", f, o) :- sfdef(f, o).
+fpt("EPSILON", f, o) :- sfstore(f, v), vpt(v, o).
+fpt(bh, f, o) :- ifstore(b, f, v), vpt(b, bh), vpt(v, o).
+fpt(bh, f, o) :- ifdef(b, f, o), vpt(b, bh).
+
+ipmv(d, s) :- maycall(i, m), formal(m, n, d), actual(i, n, s).
+ipmv(d, s) :- maycall(i, m), fret(m, s), aret(i, d).
+ipmv(d, s) :- maycall(i, m), self(m, d), rcvar(i, s).

@@ -18,8 +18,8 @@ public class Driver {
     public static void main(String[] args) {
         PackManager.v().getPack("wjtp").add(new Transform("wjtp.myTransformer", new MyTransformer()));
         Options.v().set_whole_program(true);
-        Options.v().set_main_class("org.apache.commons.math4.MockMain");
-        Options.v().set_soot_classpath("/usr/lib/jvm/jdk1.7.0_80/jre/lib/rt.jar:/usr/lib/jvm/jdk1.7.0_80/jre/lib/jce.jar:/home/ali/CP/commons-math/target/classes/:/home/ali/CP/commons-math/target/test-classes/:/home/ali/CP/junit-4.11.jar:/home/ali/CP/hamcrest-all-1.3.jar");
+        Options.v().set_main_class("edu.utdallas.main.Main");//org.apache.commons.math4.MockMain");
+        Options.v().set_soot_classpath("/usr/lib/jvm/jdk1.7.0_80/jre/lib/rt.jar:/usr/lib/jvm/jdk1.7.0_80/jre/lib/jce.jar:/home/ali/eclipse-workspace/subject-prog/target/classes/");// /home/ali/CP/commons-math/target/classes/:/home/ali/CP/commons-math/target/test-classes/:/home/ali/CP/junit-4.11.jar:/home/ali/CP/hamcrest-all-1.3.jar");
         Dom<Integer> N = new Dom<>();
         N.setName("N");
         N.add(10);
@@ -39,12 +39,12 @@ public class Driver {
 //            excludeList.add(p);
 //        }
 //        //Options.v().set_exclude(excludeList);
-        //Options.v().set_app(true);
+        Options.v().set_app(true);
         Options.v().set_output_format(Options.output_format_jimple);
 //        Options.v().set_include(excludeList);
 //        Options.v().set_no_bodies_for_excluded(true);
 //        System.out.println(Options.v().include());
-        soot.Main.v().run(new String[] {"org.apache.commons.math4.MockMain"});
+        soot.Main.v().run(new String[] {"edu.utdallas.main.Main"});
     }
 }
 /**

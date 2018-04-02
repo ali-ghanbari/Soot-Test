@@ -1,0 +1,42 @@
+.include "H.dom"	# domain of heap abstractions
+.include "V.dom" 	# domain of local variables
+.include "I.dom" 	# domain of method invocations
+.include "M.dom"	# domain of methods
+.include "F.dom"	# domain of fields
+.include "T.dom"	# domain of (non-primitive, object) types
+.include "S.dom"	# domain of method signatures
+.include "N.dom"	# natuaral numbers from 0 through 255
+
+### Input Relations
+
+move(dst : V0, src : V1)  input			  	# statements of the form dst = src, where src and dst are local variables
+ifload(dst : V0, base : V1, field : F0)	   input	# statements of the form dst = base.field
+sfload(dst : V0, field : F0)	  input	   		# statements of the form dst = ClassName.field
+ifstore(base : V0, field : F0, src : V1)   input	# statements of the form base.field = src
+sfstore(field : F0, src : V0)  input 	   		# statements of the form ClassName.field = src
+vardef(lhs : V0, cst : H0)     input 			# statements of the form lhs = null or lhs = "string constant"
+ifdef(base : V0, field : F0, cst : H0) input	  	# statements of the form base.field = null or base.field = "string constant"
+sfdef(field : F0, cst : H0) input	  		# statements of the form ClassName.field = null or ClassName.field = "string constant"
+paramdef(inv : I0, n : N0, ha : H0)	  input	      	# method invocations of the form ...method(...null...) or ...method(..."string constant"...)
+retdef(meth : M0, ha : H0) input	  		# statements of the form return null or return "string constant"
+formal(meth : M0, n : N0, p : V0)	  input	       	# n's parameter of the method meth is variable p
+actual(inv : I0, n : N0, a : V0)	  input	       	# the local variable a is passed as an actual parameter at the method invocation point inv
+fret(meth : M0, r : V0)	 input		  		# the method meth returns its local r
+aret(inv : I0, a : V0)	 input		  		# the variable a is assigned the return value of some method called at inv
+maycall(inv : I0, callee : M0)		  input		# the method callee may be called at the invocation point inv
+
+###################
+
+### Missing Input Relations
+# relations for handling control/data flow of exceptions. any treatment of arrays is also missing
+# I shall add them once we achieved some decent performance with this minimalistic design.
+###########################
+
+out1(hh : H0, dd : H1)	output
+out2(hh : H0, cc : H1)	output
+
+out1(h, d), out2(c, e) :- d = c.
+
+### Rules
+# actual rule defintions will be placed here
+#########
