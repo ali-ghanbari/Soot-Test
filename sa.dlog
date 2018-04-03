@@ -6,6 +6,7 @@
 .include "T.dom"						# domain of (non-primitive, object) types
 .include "S.dom"						# domain of method signatures
 .include "N.dom"						# natuaral numbers from 0 through 255
+.include "A.dom"						# domain of method names
 
 ### Input Relations
 
@@ -26,6 +27,8 @@ self(meth : M0, this : V0)				input	# identifies this variable of a method
 fret(meth : M0, r : V0)	     				input	# the method meth returns its local r
 aret(inv : I0, a : V0)	 				input	# the variable a is assigned the return value of some method called at inv
 maycall(inv : I0, callee : M0)		  		input	# the method callee may be called at the invocation point inv
+name(meth : M0, name : A0) 				input	# the method meth is identified by the identifier name
+strfac(v : V0)	       					input	# identifies the set of variables that are string factories, i.e. StringBuilder or StringBuffer
 
 ### Output Relations
 
@@ -35,6 +38,9 @@ fpt(baseHeap : H0, field : F0, obj : H1)		output
 ### Intermediate Relations
 
 ipmv(dst : V0, src : V1)					# interprocedural move
+tostrsite(ar : V0, rcv : V1)					# toString call site of the form "ar = rcv.toString()"
+appsitetemp(inv : I0, rcv : V0) 
+appsite(rcvheap : H0, paramheap : H1)				# append call site of the form "... = rcv.append(par)"
 
 ### Rules
 
@@ -45,6 +51,7 @@ vpt(v, o) :- move(v, s), vpt(s, o).
 vpt(v, o) :- ipmv(v, s), vpt(s, o).
 vpt(v, o) :- sfload(v, f), fpt("EPSILON", f, o).
 vpt(v, o) :- ifload(v, b, f), vpt(b, bh), fpt(bh, f, o).
+vpt(v, o) :- tostrsite(v, r), vpt(r, h), appsite(h, o).
 
 fpt("EPSILON", f, o) :- sfdef(f, o).
 fpt("EPSILON", f, o) :- sfstore(f, v), vpt(v, o).
@@ -54,3 +61,9 @@ fpt(bh, f, o) :- ifdef(b, f, o), vpt(b, bh).
 ipmv(d, s) :- maycall(i, m), formal(m, n, d), actual(i, n, s).
 ipmv(d, s) :- maycall(i, m), fret(m, s), aret(i, d).
 ipmv(d, s) :- maycall(i, m), self(m, d), rcvar(i, s).
+
+tostrsite(a, r) :- maycall(i, m), name(m, "toString"), aret(i, a), rcvar(i, r).
+
+appsitetemp(i, r) :- maycall(i, m), name(m, "append"), rcvar(i, r), strfac(r).
+appsite(h, o) :- appsitetemp(i, r), vpt(r, h), actual(i, 0, p), vpt(p, o).
+appsite(h, o) :- appsitetemp(i, r), vpt(r, h), paramdef(i, 0, o).

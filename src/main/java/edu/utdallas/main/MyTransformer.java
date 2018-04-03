@@ -3,6 +3,7 @@ package edu.utdallas.main;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import edu.utdallas.relational.Dom;
@@ -29,10 +30,8 @@ import soot.jimple.InvokeStmt;
 import soot.jimple.NewArrayExpr;
 import soot.jimple.NewExpr;
 import soot.jimple.NewMultiArrayExpr;
-import soot.jimple.NullConstant;
 import soot.jimple.ReturnStmt;
 import soot.jimple.StaticInvokeExpr;
-import soot.jimple.StringConstant;
 import soot.jimple.toolkits.callgraph.CallGraph;
 import soot.jimple.toolkits.callgraph.Edge;
 
@@ -45,6 +44,7 @@ public class MyTransformer extends SceneTransformer {
     private final Dom<Type> typesDom;
     private final Dom<MethodSignature> signaturesDom;
     private final Dom<Integer> natural;
+    private final Dom<String> methNamesDom;
     
     private final Rel vardef; // local variable definition: v = null; v = "string constant";
     private final Rel sfdef; // static field definition: ClassName.field = null; ClassName.field = "string constant";
@@ -63,6 +63,8 @@ public class MyTransformer extends SceneTransformer {
     private final Rel maycall;
     private final Rel rcvar;
     private final Rel self;
+    private final Rel name;
+    private final Rel strfac;
     
     public MyTransformer() {
         this.heapAbstractionsDom = new Dom<>();
@@ -81,6 +83,8 @@ public class MyTransformer extends SceneTransformer {
         this.signaturesDom.setName("S");
         this.natural = new Dom<>();
         this.natural.setName("N");
+        this.methNamesDom = new Dom<>();
+        this.methNamesDom.setName("A");
         
         this.move = new Rel();
         this.ifload = new Rel();
@@ -99,6 +103,8 @@ public class MyTransformer extends SceneTransformer {
         this.maycall = new Rel();
         this.rcvar = new Rel();
         this.self = new Rel();
+        this.name = new Rel();
+        this.strfac = new Rel();
     }
 
     @Override
@@ -154,6 +160,12 @@ public class MyTransformer extends SceneTransformer {
         }
     }
     
+    private void addMethName(String mn) {
+        synchronized(this.methNamesDom) {
+            this.methNamesDom.add(mn);
+        }
+    }
+    
     private void construct() {
         System.out.print("\nCollecting domains...");
         
@@ -169,19 +181,20 @@ public class MyTransformer extends SceneTransformer {
                 addField(field);
             }
             for (final SootMethod method : theClass.getMethods()) {
+                addMethName(method.getName());
                 addMethod(method);
                 addSignature(new MethodSignature(method));
             }
         });
         
-        final List<SootMethod> concAppMethods = Scene.v().getApplicationClasses().parallelStream()
+        final Set<SootMethod> appConcMethods = Scene.v().getApplicationClasses().parallelStream()
                 .map(SootClass::getMethods)
                 .flatMap(List::stream)
                 .filter(SootMethod::isConcrete)
-                .collect(Collectors.toList());
+                .collect(Collectors.toSet()); 
         
-        concAppMethods.parallelStream().forEach(method -> {
-            Body body = method.retrieveActiveBody();
+        appConcMethods.parallelStream().forEach(method -> {
+            final Body body = method.retrieveActiveBody();
             for (final Local local : body.getLocals()) {
                 addLocal(local);
             }
@@ -196,14 +209,19 @@ public class MyTransformer extends SceneTransformer {
                             addAbstractObject((AnyNewExpr) rhsValue);
                         }
                     }
-                    if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                    if (rhsValue instanceof Constant) {
                         addConstant((Constant) rhsValue);
                     }
-                } 
+                } else if (unit instanceof ReturnStmt) {
+                    Value op = ((ReturnStmt) unit).getOp();
+                    if (op instanceof Constant) {
+                        addConstant((Constant) op);
+                    }
+                }
                 final InvokeExpr ie = getInvokeExpr(unit);
                 if (ie != null) {
                     for (Value arg : ie.getArgs()) {
-                        if (arg instanceof StringConstant || arg instanceof NullConstant) {
+                        if (arg instanceof Constant) {
                             addConstant((Constant) arg);
                         }
                     }
@@ -220,6 +238,7 @@ public class MyTransformer extends SceneTransformer {
             this.typesDom.save(".", true);
             this.signaturesDom.save(".", true);
             this.natural.save(".", true);
+            this.methNamesDom.save(".", true);
         } catch (Exception e) {
             System.out.println("\t[FAILED]");
             e.printStackTrace();
@@ -313,10 +332,27 @@ public class MyTransformer extends SceneTransformer {
         this.self.setDoms(new Dom[] {this.methodsDom, this.localsDom});
         this.self.zero();
         
+        this.name.setName("name");
+        this.name.setSign("M0,A0", "M0xA0");
+        this.name.setDoms(new Dom[] {this.methodsDom, this.methNamesDom});
+        this.name.zero();
+        
+        this.strfac.setName("strfac");
+        this.strfac.setSign("V0", "V0");
+        this.strfac.setDoms(new Dom[] {this.localsDom});
+        this.strfac.zero();
+        
         final CallGraph cg = Scene.v().getCallGraph();
         
-        concAppMethods.parallelStream().forEach(method -> {
+        appConcMethods.parallelStream().forEach(method -> {
+            addMethName(method);
             final Body body = method.retrieveActiveBody();
+            for (final Local local : body.getLocals()) {
+                final Type type = local.getType();
+                if (isStringFactoryType(type.toString())) {
+                    addStrFactory(local);
+                }
+            }
             for (int i = 0; i < body.getParameterLocals().size(); i++) {
                 addFormal(method, i, body.getParameterLocal(i));
                 if (!method.isStatic()) {
@@ -326,31 +362,24 @@ public class MyTransformer extends SceneTransformer {
             final Iterator<Unit> bit = body.getUnits().iterator();
             while (bit.hasNext()) {
                 final Unit unit = bit.next();
-                if (unit instanceof InvokeStmt 
-                        || (unit instanceof AssignStmt && ((AssignStmt) unit).containsInvokeExpr())) {
-                    final InvokeExpr ie;
-                    if (unit instanceof InvokeStmt) {
-                        ie = ((InvokeStmt) unit).getInvokeExpr();
-                    } else {
-                        ie = ((AssignStmt) unit).getInvokeExpr();
-                    }
+                final InvokeExpr ie = getInvokeExpr(unit);
+                if (ie != null) {
                     final Iterator<Edge> outs = cg.edgesOutOf(unit);
                     while (outs.hasNext()) {
                         final SootMethod callee = outs.next().tgt();
-                        if (concAppMethods.contains(callee)) {
+                        if (appConcMethods.contains(callee)) {
                             addMayCall(ie, callee);
                         }
                     }
                 }
                 if (unit instanceof ReturnStmt) {
                     Value op = ((ReturnStmt) unit).getOp();
-                    if (op instanceof StringConstant || op instanceof NullConstant) {
+                    if (op instanceof Constant) {
                         addRetDef(method, new ConstantObject((Constant) op));
                     } else if (op instanceof Local) {
                         addFRet(method, (Local) op);
                     }
                 } else if (unit instanceof InvokeStmt) {
-                    final InvokeExpr ie = ((InvokeStmt) unit).getInvokeExpr();
                     if (!(ie instanceof StaticInvokeExpr)) {
                         final List<ValueBox> useBoxes = ie.getUseBoxes();
                         final Local rcvar = (Local) useBoxes.get(useBoxes.size() - 1).getValue();
@@ -358,7 +387,7 @@ public class MyTransformer extends SceneTransformer {
                     }
                     for (int i = 0; i < ie.getArgCount(); i ++) {
                         final Value arg = ie.getArg(i);
-                        if (arg instanceof StringConstant || arg instanceof NullConstant) {
+                        if (arg instanceof Constant) {
                             addParamDef(ie, i, new ConstantObject((Constant) arg));
                         } else if (arg instanceof Local) {
                             addActual(ie, i, (Local) arg);
@@ -366,12 +395,11 @@ public class MyTransformer extends SceneTransformer {
                     }
                 } else if (unit instanceof AssignStmt) {
                     final Value lhsValue = ((AssignStmt) unit).getLeftOp();
-                    if (((AssignStmt) unit).containsInvokeExpr()) {
-                        final InvokeExpr ie = ((AssignStmt) unit).getInvokeExpr();
+                    if (ie != null) {
                         addARet(ie, (Local) lhsValue);
                         for (int i = 0; i < ie.getArgCount(); i ++) {
                             final Value arg = ie.getArg(i);
-                            if (arg instanceof StringConstant || arg instanceof NullConstant) {
+                            if (arg instanceof Constant) {
                                 addParamDef(ie, i, new ConstantObject((Constant) arg));
                             } else if (arg instanceof Local) {
                                 addActual(ie, i, (Local) arg);
@@ -384,7 +412,7 @@ public class MyTransformer extends SceneTransformer {
                         if (rhsValue instanceof Local) {
                             final Local rhsLocal = (Local) rhsValue;
                             addMove(lhsLocal, rhsLocal);
-                        } else if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                        } else if (rhsValue instanceof Constant) {
                             addVarDef(lhsLocal, new ConstantObject((Constant) rhsValue));
                         } else if (rhsValue instanceof AnyNewExpr) {
                             final Type type = getBaseType((AnyNewExpr) rhsValue);
@@ -408,13 +436,13 @@ public class MyTransformer extends SceneTransformer {
                             final Local base = (Local) fr.getUseBoxes().get(0).getValue();
                             if (rhsValue instanceof Local) {
                                 addInstanceFieldStore(base, field, (Local) rhsValue);
-                            }  else if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                            }  else if (rhsValue instanceof Constant) {
                                 addIFDef(base, field, new ConstantObject((Constant) rhsValue));
                             }
                         } else { //static field reference
                             if (rhsValue instanceof Local) {
                                 addStaticFieldStore(field, (Local) rhsValue);
-                            } else if (rhsValue instanceof StringConstant || rhsValue instanceof NullConstant) {
+                            } else if (rhsValue instanceof Constant) {
                                 addSFDef(field, new ConstantObject((Constant) rhsValue));
                             }
                         }
@@ -440,12 +468,26 @@ public class MyTransformer extends SceneTransformer {
             this.maycall.save(".");
             this.rcvar.save(".");
             this.self.save(".");
+            this.name.save(".");
+            this.strfac.save(".");
         } catch (Exception e) {
             System.out.println("\t[FAILED]");
             e.printStackTrace();
             System.exit(0);
         }
         System.out.println("\t[OK]");
+    }
+    
+    private void addStrFactory(Local l) {
+        synchronized (this.strfac) {
+            this.strfac.add(l);
+        }
+    }
+    
+    private void addMethName(SootMethod method) {
+        synchronized (this.name) {
+            this.name.add(method, method.getName());
+        }
     }
     
     private void addSelf(SootMethod method, Local tl) {
@@ -579,6 +621,10 @@ public class MyTransformer extends SceneTransformer {
 //        
     private boolean isStringType(String typeName) {
         return typeName.matches("java\\.lang\\.String|java\\.lang\\.StringBuilder|java\\.lang\\.StringBuffer");
+    }
+    
+    private boolean isStringFactoryType(String typeName) {
+        return typeName.matches("java\\.lang\\.StringBuilder|java\\.lang\\.StringBuffer");
     }
     
     private InvokeExpr getInvokeExpr(Unit u) {
